@@ -13,7 +13,7 @@ class ColumnGenerationPacker:
     def __init__(self, bin_dims):
         self.bin_dims = bin_dims
         self.patterns = []
-        self.s极_data = None
+        self.sku_data = None
         self.dual_values = None
         self.stability_center = None
         self.trust_region = 0.5
@@ -396,7 +396,7 @@ def calculate_metrics(placements, bin_dims, total_skus):
         print("=" * 65)
 
 if __name__ == "__main__":
-    CSV_FILE = "cleaned_picklist_dataset_with_config.csv"
+    CSV_FILE = "ned_picklist_dataset_wicleath_config.csv"
     NUM_SKUS = 70  # Default to 100 SKUs
     
     try:
