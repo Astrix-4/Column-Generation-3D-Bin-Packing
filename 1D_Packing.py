@@ -1,162 +1,225 @@
-# Column Generation for 1D Bin Packing using DOcplex
+# ===============================================
+# 2D Bin Packing via Column Generation with EA & CPLEX
+# Based on Puchinger & Raidl (2004) GECCO Paper
+# ===============================================
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from docplex.mp.model import Model
+# SECTION 1: Imports & Configuration
+import os
 import time
+import random
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from collections import defaultdict
+from docplex.mp.model import Model
 
-# ===== USER CONFIGURATION =====
-BIN_CAPACITY = 100
-CSV_PATH = "/Users/manav/Desktop/Column-Generation-3D-Bin-Packing/cleaned_picklist_dataset_with_config.csv"
+# SECTION 2: Global Parameters (easily configurable)
+BIN_WIDTH = 100
+BIN_HEIGHT = 100
+MAX_ITERATIONS = 1000
+MAX_TIME = 600  # in seconds
+ENABLE_EA = True
+ENABLE_ILP_FALLBACK = True
+RANDOM_SEED = 42
+EA_POP_SIZE = 100
+EA_MUTATION_PROB = 0.75
+EA_MAX_GENERATIONS = 1000
+EA_MAX_NO_IMPROVE = 200
 
-# ===== TERMINATION CONTROL =====
-USE_REDUCED_COST = True
-USE_MAX_ITER = True
-USE_TIME_LIMIT = False
-USE_DUAL_IMPROVEMENT = True
+INPUT_CSV = "/Users/manav/Desktop/Column-Generation-3D-Bin-Packing/cleaned_picklist_dataset_with_config.csv"
+OUTPUT_FOLDER = "2D_Visualization"
+REPORT_FILE = "2D_Visualization/final_report.csv"
 
-MAX_ITER = 500
-MAX_TIME = 300  # in seconds
-DUAL_IMPROVEMENT_TOL = 1e-4
-NO_IMPROVEMENT_LIMIT = 3
+random.seed(RANDOM_SEED)
+import shutil
+if os.path.exists(OUTPUT_FOLDER):
+    for filename in os.listdir(OUTPUT_FOLDER):
+        if filename.endswith(".jpg"):
+            os.remove(os.path.join(OUTPUT_FOLDER, filename))
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# ===== LOAD DATA =====
-df = pd.read_csv(CSV_PATH)
-item_lengths = df['Length'].values
-num_items = len(item_lengths)
+# SECTION 3: Data Structures
+class Item:
+    def __init__(self, id, width, height):
+        self.id = id
+        self.width = width
+        self.height = height
 
-# ===== INITIAL PATTERNS (ONE ITEM PER BIN) =====
-patterns = []
-for i in range(num_items):
-    pattern = [0] * num_items
-    pattern[i] = 1
-    patterns.append(pattern)
+class Pattern:
+    def __init__(self, items):
+        self.items = items  # list of Item
+        self.width = max([i.width for i in items]) if items else 0
+        self.height = sum([i.height for i in items])
+        self.area = self.width * self.height
 
-# ===== FUNCTION: BUILD AND SOLVE RMP WITH DOCPLEX =====
-def solve_rmp_docplex(patterns, duals_required=True, integer=False):
-    model = Model("RMP")
-    x_vars = model.integer_var_list(len(patterns), lb=0, name="x") if integer else model.continuous_var_list(len(patterns), lb=0, name="x")
+    def total_profit(self, duals):
+        return sum([duals.get(i.id, 0) for i in self.items])
 
-    # Constraints: each item must be packed at least once
-    constraints = []
-    for i in range(num_items):
-        constraint = model.add_constraint(
-            model.sum(x_vars[j] * patterns[j][i] for j in range(len(patterns))) >= 1,
-            f"cover_{i}"
-        )
-        constraints.append(constraint)
+    def __repr__(self):
+        return f"Pattern(items={[i.id for i in self.items]}, height={self.height}, width={self.width})"
 
-    # Objective: Minimize number of bins
-    model.minimize(model.sum(x_vars))
-    solution = model.solve()
+# SECTION 4: Load Items from CSV
+def load_items(max_items=None):
+    df = pd.read_csv(INPUT_CSV)
+    if max_items is not None:
+        df = df.head(max_items)
+    items = []
+    for idx, row in df.iterrows():
+        w = int(row['Width'])
+        h = int(row['Length'])  # length used as height
+        items.append(Item(idx, w, h))
+    return items
 
-    if not solution:
-        raise RuntimeError("RMP could not be solved")
+# SECTION 5: Visualization and Report
+def visualize_bins(bin_patterns):
+    report_data = []
+    for i, pattern in enumerate(bin_patterns):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.set_xlim(0, BIN_WIDTH)
+        ax.set_ylim(0, BIN_HEIGHT)
+        ax.set_title(f"Bin {i+1}")
+        ax.set_aspect('equal')
+        ax.axis('off')
 
-    x_vals = solution.get_values(x_vars)
-    duals = [c.dual_value for c in constraints] if duals_required else None
+        y_offset = 0
+        for item in pattern.items:
+            rect = Rectangle((0, y_offset), item.width, item.height, linewidth=1, edgecolor='black', facecolor='lightblue')
+            ax.add_patch(rect)
+            ax.text(item.width / 2, y_offset + item.height / 2, f"ID {item.id}", ha='center', va='center', fontsize=8)
+            report_data.append({"Bin": i+1, "ItemID": item.id, "Width": item.width, "Height": item.height, "Y_Offset": y_offset})
+            y_offset += item.height
 
-    return x_vals, duals, model
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_FOLDER, f"bin_{i+1:03d}.jpg"))
+        plt.close()
 
-# ===== FUNCTION: SOLVE PRICING PROBLEM (KNAPSACK) =====
-def solve_pricing_problem(duals):
-    n = len(duals)
-    dp = [0] * (BIN_CAPACITY + 1)
-    keep = [[] for _ in range(BIN_CAPACITY + 1)]
+    # Save final report
+    df_report = pd.DataFrame(report_data)
+    df_report.to_csv(REPORT_FILE, index=False)
 
-    for i in range(n):
-        size = int(item_lengths[i])
-        value = duals[i]
-        for c in range(BIN_CAPACITY, size - 1, -1):
-            if dp[c - size] + value > dp[c]:
-                dp[c] = dp[c - size] + value
-                keep[c] = keep[c - size] + [i]
+# SECTION 6: Greedy FFBC Heuristic
+def greedy_generate(items, duals):
+    patterns = []
+    unplaced = set(items)
+    while unplaced:
+        pattern_items = []
+        h_used = 0
+        for item in sorted(unplaced, key=lambda x: -duals.get(x.id, 0)):
+            if h_used + item.height <= BIN_HEIGHT:
+                pattern_items.append(item)
+                h_used += item.height
+        if not pattern_items:
+            break
+        for i in pattern_items:
+            unplaced.remove(i)
+        patterns.append(Pattern(pattern_items))
+    return patterns
 
-    best_value = max(dp)
-    best_config = keep[dp.index(best_value)]
-    return best_value, best_config
+# SECTION 7: EA-based Pricing Heuristic
+def ea_generate(items, duals):
+    def fitness(pattern):
+        return pattern.total_profit(duals)
 
-# ===== ITERATIVE COLUMN GENERATION LOOP =====
-iteration = 0
-start_time = time.time()
-no_improve_count = 0
-prev_obj_val = float("inf")
+    def mutate(pattern):
+        new_items = pattern.items[:]
+        if new_items:
+            idx = random.randint(0, len(new_items) - 1)
+            del new_items[idx]
+        random.shuffle(new_items)
+        return build_pattern(new_items)
 
-while True:
-    iteration += 1
-    print(f"\nIteration {iteration}: Solving RMP with {len(patterns)} patterns")
-    solution, duals, model = solve_rmp_docplex(patterns, duals_required=True)
-    current_obj = model.objective_value
+    def build_pattern(candidate_items):
+        packed, height = [], 0
+        for item in candidate_items:
+            if height + item.height <= BIN_HEIGHT:
+                packed.append(item)
+                height += item.height
+        return Pattern(packed)
 
-    value, config = solve_pricing_problem(duals)
-    reduced_cost = 1 - value
-
-    # ===== Check Termination Conditions =====
-    stop = False
-    if USE_REDUCED_COST and reduced_cost >= -1e-6:
-        print("No new column with negative reduced cost. Stopping.")
-        stop = True
-    if USE_MAX_ITER and iteration >= MAX_ITER:
-        print(f"Reached max iteration limit ({MAX_ITER}). Stopping.")
-        stop = True
-    if USE_TIME_LIMIT and (time.time() - start_time) >= MAX_TIME:
-        print(f"Time limit of {MAX_TIME} seconds reached. Stopping.")
-        stop = True
-    if USE_DUAL_IMPROVEMENT:
-        if abs(prev_obj_val - current_obj) < DUAL_IMPROVEMENT_TOL:
-            no_improve_count += 1
-            if no_improve_count >= NO_IMPROVEMENT_LIMIT:
-                print(f"No significant improvement in dual objective for {NO_IMPROVEMENT_LIMIT} iterations. Stopping.")
-                stop = True
+    population = [build_pattern(random.sample(items, len(items))) for _ in range(EA_POP_SIZE)]
+    best = max(population, key=fitness)
+    no_improve = 0
+    for gen in range(EA_MAX_GENERATIONS):
+        if no_improve >= EA_MAX_NO_IMPROVE:
+            break
+        child = mutate(best)
+        if fitness(child) > fitness(best):
+            best = child
+            no_improve = 0
         else:
-            no_improve_count = 0
-        prev_obj_val = current_obj
+            no_improve += 1
+    if best.total_profit(duals) > 1.0001:
+        return best
+    return None
 
-    if stop:
-        break
+# SECTION 8: ILP Pricing Problem
 
-    print(f"Adding new pattern with reduced cost {reduced_cost:.4f}")
-    new_pattern = [0] * num_items
-    for i in config:
-        new_pattern[i] = 1
-    patterns.append(new_pattern)
+def solve_ilp_pricing(items, duals):
+    mdl = Model(name="PricingProblem")
+    x = {i.id: mdl.binary_var(name=f"x_{i.id}") for i in items}
 
-# ===== FINAL INTEGER SOLVE =====
-final_solution, _, _ = solve_rmp_docplex(patterns, duals_required=False, integer=True)
+    mdl.add_constraint(mdl.sum(i.width * x[i.id] for i in items) <= BIN_WIDTH)
+    mdl.add_constraint(mdl.sum(i.height * x[i.id] for i in items) <= BIN_HEIGHT)
+    mdl.maximize(mdl.sum(duals[i.id] * x[i.id] for i in items))
+    sol = mdl.solve(log_output=False)
 
-# ===== METRICS AND VISUALIZATION =====
-used_bins = []
-for j, val in enumerate(final_solution):
-    if int(round(val)) > 0:
-        for _ in range(int(round(val))):
-            used_bins.append(patterns[j])
+    if sol and sol.get_objective_value() > 1 + 1e-5:
+        return Pattern([i for i in items if sol.get_value(x[i.id]) > 0.5])
+    return None
 
-total_bins = len(used_bins)
-total_length = sum(item_lengths)
-fill_levels = []
+# SECTION 9: Column Generation Loop
+def column_generation(items):
+    patterns = greedy_generate(items, defaultdict(lambda: 1))
+    iteration = 0
+    start_time = time.time()
+    while iteration < MAX_ITERATIONS and time.time() - start_time < MAX_TIME:
+        mdl = Model(name=f"Master_{iteration}")
+        x = [mdl.continuous_var(lb=0, ub=1, name=f"x_{i}") for i in range(len(patterns))]
+        for item in items:
+            mdl.add_constraint(mdl.sum(x[i] for i in range(len(patterns)) if item in patterns[i].items) >= 1)
+        mdl.minimize(mdl.sum(x))
+        sol = mdl.solve()
+        if not sol:
+            print("[Warning] Master problem couldn't be solved. Breaking.")
+            break
+        duals = {item.id: c.dual_value for item, c in zip(items, mdl.iter_constraints())}
 
-print("\n===== FINAL METRICS =====")
-print(f"Total bins used: {total_bins}")
+        new_pattern = None
+        method_used = None
 
-for b in used_bins:
-    fill = sum(item_lengths[i] for i, used in enumerate(b) if used)
-    fill_levels.append(fill)
+        if ENABLE_EA:
+            new_pattern = ea_generate(items, duals)
+            if new_pattern:
+                method_used = "EA"
 
-avg_fill = np.mean(fill_levels)
-print(f"Average fill per bin: {avg_fill:.2f}")
-print(f"Fill rate: {avg_fill / BIN_CAPACITY * 100:.2f}%")
+        if not new_pattern and ENABLE_ILP_FALLBACK:
+            new_pattern = solve_ilp_pricing(items, duals)
+            if new_pattern:
+                method_used = "ILP"
 
-plt.figure(figsize=(10, 6))
-plt.hist(fill_levels, bins=10, color='lightgreen', edgecolor='black')
-plt.title("Histogram of Bin Fill Levels")
-plt.xlabel("Fill Level")
-plt.ylabel("Number of Bins")
-plt.grid(True)
-plt.tight_layout()
-plt.savefig("final_bin_fill_distribution.png")  # Save the final plot
-plt.show()
+        if not new_pattern:
+            print(f"[Info] No improving column found at iteration {iteration}. Terminating.")
+            break
+        else:
+            patterns.append(new_pattern)
+            rc = 1 - new_pattern.total_profit(duals)
+            print(f"[Info] Iteration {iteration}: Added pattern (reduced cost = {rc:.4f}) via {method_used}")
+        iteration += 1
 
-# ===== SAVE FINAL RESULTS TO CSV =====
-pd.DataFrame(final_solution, columns=["Bin_Count"]).to_csv("final_bin_solution.csv", index_label="Pattern_Index")
-print("\nSaved final solution to 'final_bin_solution.csv'")
+    total_time = time.time() - start_time
+    print(f"[Done] Column Generation completed in {iteration} iterations and {total_time:.2f} seconds.")
+    return patterns
+
+# SECTION 10: Main Entry Point
+if __name__ == "__main__":
+    if not os.path.exists(INPUT_CSV):
+        raise FileNotFoundError(f"CSV file '{INPUT_CSV}' not found.")
+    print("[Start] Reading input items...")
+    MAX_ITEMS = 100  # Set to an integer to limit the number of items loaded
+    items = load_items(MAX_ITEMS)
+    print(f"[Info] Loaded {len(items)} items. Starting Column Generation...")
+    final_patterns = column_generation(items)
+    visualize_bins(final_patterns)  # Save each bin separately and report
+    print(f"[Result] Used {len(final_patterns)} bin patterns. Report saved to '{REPORT_FILE}'")
