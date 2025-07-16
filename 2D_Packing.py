@@ -18,8 +18,9 @@ from docplex.mp.model import Model
 # SECTION 2: Global Parameters (easily configurable)
 BIN_WIDTH = 100
 BIN_HEIGHT = 100
-MAX_ITERATIONS = 100
+MAX_ITERATIONS = 800
 MAX_TIME = 600  # in seconds
+MAX_ITEMS = None  # Set to an integer to limit the number of items loaded
 ENABLE_EA = True  # Set to False to disable EA
 ENABLE_ILP_FALLBACK = True  # Set to False to disable ILP fallback
 RANDOM_SEED = 42
@@ -32,6 +33,7 @@ INPUT_CSV = "/Users/manav/Desktop/Column-Generation-3D-Bin-Packing/cleaned_pickl
 OUTPUT_FOLDER = "2D_Visualization"
 REPORT_FILE = "2D_Visualization/final_report.csv"
 
+ALLOW_ROTATION = True  # Set to False to disable rotation
 random.seed(RANDOM_SEED)
 import shutil
 if os.path.exists(OUTPUT_FOLDER):
@@ -47,18 +49,21 @@ class Item:
         self.width = width
         self.height = height
 
+    def get_orientations(self):
+        return [(self.width, self.height), (self.height, self.width)] if ALLOW_ROTATION else [(self.width, self.height)]
+
 class Pattern:
     def __init__(self, items):
-        self.items = items  # list of Item
-        self.width = max([i.width for i in items]) if items else 0
-        self.height = sum([i.height for i in items])
+        self.items = items  # list of tuples (Item, width, height)
+        self.width = max([w for (_, w, _) in items]) if items else 0
+        self.height = sum([h for (_, _, h) in items])
         self.area = self.width * self.height
 
     def total_profit(self, duals):
-        return sum([duals.get(i.id, 0) for i in self.items])
+        return sum([duals.get(i.id, 0) for (i, _, _) in self.items])
 
     def __repr__(self):
-        return f"Pattern(items={[i.id for i in self.items]}, height={self.height}, width={self.width})"
+        return f"Pattern(items={[i.id for i, _, _ in self.items]}, height={self.height}, width={self.width})"
 
 # SECTION 4: Load Items from CSV
 def load_items(max_items=None):
@@ -68,7 +73,7 @@ def load_items(max_items=None):
     items = []
     for idx, row in df.iterrows():
         w = int(row['Width'])
-        h = int(row['Length'])  # length used as height
+        h = int(row['Length'])  # Length used as height
         items.append(Item(idx, w, h))
     return items
 
@@ -79,7 +84,7 @@ def visualize_bins(bin_patterns):
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.set_xlim(0, BIN_WIDTH)
         ax.set_ylim(0, BIN_HEIGHT)
-        total_item_area = sum(item.width * item.height for item in pattern.items)
+        total_item_area = sum(w * h for _, w, h in pattern.items)
         bin_area = BIN_WIDTH * BIN_HEIGHT
         efficiency = total_item_area / bin_area * 100
         ax.set_title(f"Bin {i+1} - Efficiency: {efficiency:.2f}%")
@@ -87,18 +92,17 @@ def visualize_bins(bin_patterns):
         ax.axis('off')
 
         y_offset = 0
-        for item in pattern.items:
-            rect = Rectangle((0, y_offset), item.width, item.height, linewidth=1, edgecolor='black', facecolor='lightblue')
+        for item, w, h in pattern.items:
+            rect = Rectangle((0, y_offset), w, h, linewidth=1, edgecolor='black', facecolor='lightblue')
             ax.add_patch(rect)
-            ax.text(item.width / 2, y_offset + item.height / 2, f"ID {item.id}", ha='center', va='center', fontsize=8)
-            report_data.append({"Bin": i+1, "ItemID": item.id, "Width": item.width, "Height": item.height, "Y_Offset": y_offset, "Efficiency(%)": round(efficiency, 2)})
-            y_offset += item.height
+            ax.text(w / 2, y_offset + h / 2, f"ID {item.id}{' (R)' if w != item.width else ''}", ha='center', va='center', fontsize=8)
+            report_data.append({"Bin": i+1, "ItemID": item.id, "Width": w, "Height": h, "Y_Offset": y_offset, "Efficiency(%)": round(efficiency, 2)})
+            y_offset += h
 
         plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_FOLDER, f"bin_{i+1:03d}.jpg"))
         plt.close()
 
-    # Save final report
     df_report = pd.DataFrame(report_data)
     df_report.to_csv(REPORT_FILE, index=False)
 
@@ -110,13 +114,17 @@ def greedy_generate(items, duals):
         pattern_items = []
         h_used = 0
         for item in sorted(unplaced, key=lambda x: -duals.get(x.id, 0)):
-            if h_used + item.height <= BIN_HEIGHT:
-                pattern_items.append(item)
-                h_used += item.height
+            placed = False
+            for w, h in item.get_orientations():
+                if h_used + h <= BIN_HEIGHT and w <= BIN_WIDTH:
+                    pattern_items.append((item, w, h))
+                    h_used += h
+                    placed = True
+                    break
+            if placed:
+                unplaced.remove(item)
         if not pattern_items:
             break
-        for i in pattern_items:
-            unplaced.remove(i)
         patterns.append(Pattern(pattern_items))
     return patterns
 
@@ -126,7 +134,7 @@ def ea_generate(items, duals):
         return pattern.total_profit(duals)
 
     def mutate(pattern):
-        new_items = pattern.items[:]
+        new_items = [i for i, _, _ in pattern.items]
         if new_items:
             idx = random.randint(0, len(new_items) - 1)
             del new_items[idx]
@@ -134,11 +142,14 @@ def ea_generate(items, duals):
         return build_pattern(new_items)
 
     def build_pattern(candidate_items):
-        packed, height = [], 0
+        packed = []
+        height_used = 0
         for item in candidate_items:
-            if height + item.height <= BIN_HEIGHT:
-                packed.append(item)
-                height += item.height
+            for w, h in item.get_orientations():
+                if height_used + h <= BIN_HEIGHT and w <= BIN_WIDTH:
+                    packed.append((item, w, h))
+                    height_used += h
+                    break
         return Pattern(packed)
 
     population = [build_pattern(random.sample(items, len(items))) for _ in range(EA_POP_SIZE)]
@@ -158,18 +169,27 @@ def ea_generate(items, duals):
     return None
 
 # SECTION 8: ILP Pricing Problem
-
 def solve_ilp_pricing(items, duals):
-    mdl = Model(name="PricingProblem")
+    mdl = Model(name="PricingProblemWithRotation")
     x = {i.id: mdl.binary_var(name=f"x_{i.id}") for i in items}
+    xr = {i.id: mdl.binary_var(name=f"xr_{i.id}") for i in items}
 
-    mdl.add_constraint(mdl.sum(i.width * x[i.id] for i in items) <= BIN_WIDTH)
-    mdl.add_constraint(mdl.sum(i.height * x[i.id] for i in items) <= BIN_HEIGHT)
-    mdl.maximize(mdl.sum(duals[i.id] * x[i.id] for i in items))
+    mdl.add_constraint(mdl.sum(i.width * x[i.id] + i.height * xr[i.id] for i in items) <= BIN_WIDTH)
+    mdl.add_constraint(mdl.sum(i.height * x[i.id] + i.width * xr[i.id] for i in items) <= BIN_HEIGHT)
+    for i in items:
+        mdl.add_constraint(x[i.id] + xr[i.id] <= 1)
+
+    mdl.maximize(mdl.sum(duals[i.id] * (x[i.id] + xr[i.id]) for i in items))
     sol = mdl.solve(log_output=False)
 
     if sol and sol.get_objective_value() > 1 + 1e-5:
-        return Pattern([i for i in items if sol.get_value(x[i.id]) > 0.5])
+        selected = []
+        for i in items:
+            if sol.get_value(x[i.id]) > 0.5:
+                selected.append((i, i.width, i.height))
+            elif sol.get_value(xr[i.id]) > 0.5:
+                selected.append((i, i.height, i.width))
+        return Pattern(selected)
     return None
 
 # SECTION 9: Column Generation Loop
@@ -183,7 +203,7 @@ def column_generation(items):
         mdl = Model(name=f"Master_{iteration}")
         x = [mdl.continuous_var(lb=0, ub=1, name=f"x_{i}") for i in range(len(patterns))]
         for item in items:
-            mdl.add_constraint(mdl.sum(x[i] for i in range(len(patterns)) if item in patterns[i].items) >= 1)
+            mdl.add_constraint(mdl.sum(x[i] for i in range(len(patterns)) if item.id in [itm.id for itm, _, _ in patterns[i].items]) >= 1)
         mdl.minimize(mdl.sum(x))
         sol = mdl.solve()
         if not sol:
@@ -208,27 +228,37 @@ def column_generation(items):
                 new_pattern = solve_ilp_pricing(items, duals)
                 if new_pattern:
                     method_used = "ILP"
-            new_pattern = ea_generate(items, duals)
-            if new_pattern:
-                method_used = "EA"
-
-        if not new_pattern and ENABLE_ILP_FALLBACK:
-            new_pattern = solve_ilp_pricing(items, duals)
-            if new_pattern:
-                method_used = "ILP"
 
         if not new_pattern:
             print(f"[Info] No improving column found at iteration {iteration}. Terminating.")
             break
         else:
-            patterns.append(new_pattern)
-            rc = 1 - new_pattern.total_profit(duals)
+            profit = new_pattern.total_profit(duals)
+            rc = 1 - profit
+            if profit <= 1 + 1e-5:
+                print(f"[Stop] No improving column (profit = {profit:.5f}).")
+                break
+            print(f"[Log] Dual profits: {[round(duals[item.id], 3) for item in items[:5]]}...")
+            print(f"[Log] Pattern Profit: {profit:.5f}")
             print(f"[Info] Iteration {iteration}: Added pattern (reduced cost = {rc:.4f}) via {method_used}")
+            patterns.append(new_pattern)
         iteration += 1
 
     total_time = time.time() - start_time
     print(f"[Done] Column Generation completed in {iteration} iterations and {total_time:.2f} seconds.")
-    return patterns
+
+    # Final ILP Solve for integrality
+    print("[Final ILP] Solving master problem as ILP for integral bin selection...")
+    mdl = Model(name="FinalMasterILP")
+    x = [mdl.binary_var(name=f"x_{i}") for i in range(len(patterns))]
+    for item in items:
+        mdl.add_constraint(mdl.sum(x[i] for i in range(len(patterns)) if item.id in [itm.id for itm, _, _ in patterns[i].items]) >= 1)
+    mdl.minimize(mdl.sum(x))
+    solution = mdl.solve()
+
+    selected_patterns = [patterns[i] for i in range(len(patterns)) if solution.get_value(x[i]) > 0.5]
+    print(f"[Final ILP] Selected {len(selected_patterns)} bins (integral).")
+    return selected_patterns
 
 # SECTION 10: Main Entry Point
 if __name__ == "__main__":
@@ -239,5 +269,5 @@ if __name__ == "__main__":
     items = load_items(MAX_ITEMS)
     print(f"[Info] Loaded {len(items)} items. Starting Column Generation...")
     final_patterns = column_generation(items)
-    visualize_bins(final_patterns)  # Save each bin separately and report
+    visualize_bins(final_patterns)
     print(f"[Result] Used {len(final_patterns)} bin patterns. Report saved to '{REPORT_FILE}'")
