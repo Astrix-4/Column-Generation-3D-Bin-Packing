@@ -18,7 +18,7 @@ from docplex.mp.model import Model
 # SECTION 2: Global Parameters (easily configurable)
 BIN_WIDTH = 100
 BIN_HEIGHT = 100
-MAX_ITERATIONS = 800
+MAX_ITERATIONS = 500
 MAX_TIME = 600  # in seconds
 MAX_ITEMS = None  # Set to an integer to limit the number of items loaded
 ENABLE_EA = True  # Set to False to disable EA
