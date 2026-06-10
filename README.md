@@ -126,7 +126,7 @@ python solver_core.py --dataset "datasets/picklist_config.csv" --max_iter 50
 
 This framework is developed as part of ongoing operations research and structural modeling at the Indian Institute of Technology Delhi (IITD) within the Mechanical Engineering department computational pipelines.
 
-Special acknowledgment to Professor Saikat Sarkar for project direction and research parameters regarding applied optimization modeling.
+Special acknowledgment to Professor Prashant Palkar for project direction and research parameters regarding applied optimization modeling.
 
 If referencing this solver architecture in academic literature, please cite:
 
